@@ -1,0 +1,68 @@
+---
+title: "R Table Contest 2022"
+author: "Ben Richmond"
+format: html
+editor: visual
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+## Packages
+
+```{r LoadPackages}
+library(tidyverse)
+library(RSQLite)
+library(DBI)
+
+```
+
+## Match data
+
+```{r MatchData}
+# download database of european matches from https://www.kaggle.com/datasets/hugomathien/soccer
+
+con <- dbConnect(SQLite(), "RawData/database.sqlite")
+dbListTables(con)
+
+db_Country <- dbReadTable(con, 'Country')
+db_League <- dbReadTable(con, 'League')
+db_Match <- dbReadTable(con, 'Match')
+db_Player <- dbReadTable(con, 'Player')
+db_Player_Attributes <- dbReadTable(con, 'Player_Attributes')
+db_Team <- dbReadTable(con, 'Team')
+db_Team_Attributes <- dbReadTable(con, 'Team_Attributes')
+
+dbDisconnect(con)
+
+```
+
+## Scrape Ballon d'or Nominees
+
+```{r ScrapeNominees}
+
+# define list of years to scrape the data of ballon d'or results
+YearList <- db_Match %>% 
+  select(season) %>% 
+  unique() %>% 
+  mutate(StartYear = as.numeric(str_split_fixed(season,"/",2)[,1]),
+         EndYear = as.numeric(str_split_fixed(season,"/",2)[,2])) %>% 
+  select(-season) %>% 
+  pivot_longer(`StartYear`:`EndYear`, names_to = 'YearType', values_to = 'year') %>% 
+  select(-YearType) %>% 
+  unique() %>% 
+  #remove min and max years since they aren't full seasons covered in the dataset
+  filter(!year == max(year),
+         !year == min(year))
+
+```
+
+You can add options to executable code like this
+
+```{r}
+#| echo: false
+2 * 2
+```
+
+The `echo: false` option disables the printing of code (only output is displayed).

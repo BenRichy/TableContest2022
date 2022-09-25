@@ -15,6 +15,9 @@ Quarto enables you to weave together content and executable code into a finished
 library(tidyverse)
 library(RSQLite)
 library(DBI)
+library(rvest)
+library(kaggler)
+library(splitstackshape)
 
 ```
 
@@ -22,6 +25,15 @@ library(DBI)
 
 ```{r MatchData}
 # download database of european matches from https://www.kaggle.com/datasets/hugomathien/soccer
+kgl_auth(creds_file = 'kaggle.json')
+
+#https://medium.com/mcd-unison/how-to-use-kaggle-api-to-download-datasets-in-r-312179c7a99c
+response <- kgl_datasets_download_all(owner_dataset = "hugomathien/soccer")
+download.file(response[["url"]], "RawData/temp.zip", mode="wb")
+unzip_result <- unzip("RawData/temp.zip", exdir = "RawData/", overwrite = TRUE)
+
+rm(response)
+
 
 con <- dbConnect(SQLite(), "RawData/database.sqlite")
 dbListTables(con)
@@ -55,6 +67,71 @@ YearList <- db_Match %>%
   #remove min and max years since they aren't full seasons covered in the dataset
   filter(!year == max(year),
          !year == min(year))
+
+#read in csv of urls and tables to extract
+YearURL_Full <- read_csv("RawData/BallonDorURL.csv")
+
+#df of year-url
+YearURL <- YearURL_Full %>% 
+  select(-table)
+
+#df of year-table to use
+YearTable <- YearURL_Full %>% 
+  select(-url) %>% 
+  cSplit(splitCols = "table", sep = ", ", direction = "long")
+
+#init list to put tables into
+ExtractedTables <- list()
+k = 1
+
+for (i in 1:nrow(YearList)){
+  
+  YearFilter <- YearURL %>% 
+    filter(year == YearList[[i,"year"]]) %>% 
+    select(year) %>% 
+    pull()
+  
+  url <- YearURL %>% 
+    filter(year == YearFilter) %>% 
+    select(url) %>% 
+    pull()
+  
+  session <- session(url = url)
+  
+  YearTableFilter <- YearTable %>% 
+    filter(year == YearFilter)
+  
+  for (j in 1:nrow(YearTableFilter)){
+    table_number <- YearTableFilter[j,"table"] %>% 
+    pull()
+      
+    url_table <- rvest::html_table(session)[[table_number]] %>% 
+      mutate(year = YearFilter,
+             Rank = as.character(Rank),
+             Rank = as.numeric(str_extract(Rank, "[0-9]{1,2}")))
+    
+    colnames(url_table) <- gsub("^Player.*","Player",colnames(url_table))
+      
+  
+    ExtractedTables[[k]] <- url_table
+    k <- k+1
+  }
+  
+}
+
+ExtractedTablesAll <- do.call("bind_rows",ExtractedTables) %>% 
+  group_by(year) %>% 
+  mutate(TotalVotes =sum(Points),
+         Percent = as.numeric(str_extract(Percent, "[0-9]{1,2}\\.[0-9]{1,4}")),
+         CalcPercent = round((Points/TotalVotes)*100,2),
+         VotePercentage = case_when(!is.na(CalcPercent)~CalcPercent,
+                                    TRUE ~ Percent)) %>% 
+  select(year,
+         Rank,
+         Player,
+         Nationality,
+         "Club(s)",
+         VotePercentage)
 
 ```
 

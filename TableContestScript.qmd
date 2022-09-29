@@ -18,6 +18,7 @@ library(DBI)
 library(rvest)
 library(kaggler)
 library(splitstackshape)
+library(XML)
 
 ```
 
@@ -25,6 +26,7 @@ library(splitstackshape)
 
 ```{r MatchData}
 # download database of european matches from https://www.kaggle.com/datasets/hugomathien/soccer
+# make sure to have a personal kaggle.json file saved on local
 kgl_auth(creds_file = 'kaggle.json')
 
 #https://medium.com/mcd-unison/how-to-use-kaggle-api-to-download-datasets-in-r-312179c7a99c
@@ -84,41 +86,51 @@ YearTable <- YearURL_Full %>%
 ExtractedTables <- list()
 k = 1
 
+#loop through all items in the list of years and urls
 for (i in 1:nrow(YearList)){
   
+  #obtain year of loop
   YearFilter <- YearURL %>% 
     filter(year == YearList[[i,"year"]]) %>% 
     select(year) %>% 
     pull()
   
+  #obtain url of loop
   url <- YearURL %>% 
     filter(year == YearFilter) %>% 
     select(url) %>% 
     pull()
   
+  #run session with the url
   session <- session(url = url)
   
+  #filter the list of tables to pull from each year with that table
   YearTableFilter <- YearTable %>% 
     filter(year == YearFilter)
   
+  #loop through the tables to pull for each year
   for (j in 1:nrow(YearTableFilter)){
     table_number <- YearTableFilter[j,"table"] %>% 
     pull()
       
+    #clean each years table
     url_table <- rvest::html_table(session)[[table_number]] %>% 
       mutate(year = YearFilter,
              Rank = as.character(Rank),
              Rank = as.numeric(str_extract(Rank, "[0-9]{1,2}")))
     
+    #standardise Player as a col name
     colnames(url_table) <- gsub("^Player.*","Player",colnames(url_table))
       
-  
+    #append df to list  
     ExtractedTables[[k]] <- url_table
+    #increase counter by 1
     k <- k+1
   }
   
 }
 
+#combine all dfs
 ExtractedTablesAll <- do.call("bind_rows",ExtractedTables) %>% 
   group_by(year) %>% 
   mutate(TotalVotes =sum(Points),
@@ -126,6 +138,8 @@ ExtractedTablesAll <- do.call("bind_rows",ExtractedTables) %>%
          CalcPercent = round((Points/TotalVotes)*100,2),
          VotePercentage = case_when(!is.na(CalcPercent)~CalcPercent,
                                     TRUE ~ Percent)) %>% 
+  ungroup() %>% 
+  #remove square brackets after one name
   select(year,
          Rank,
          Player,
@@ -133,13 +147,143 @@ ExtractedTablesAll <- do.call("bind_rows",ExtractedTables) %>%
          "Club(s)",
          VotePercentage)
 
+#write csv of all unique players to create table to join to db_player
+# write_csv(ExtractedTablesAll %>%  
+#             select(Player) %>% 
+#             unique(),
+#           "RawData/BallonDorPlayers.csv")
+
+rm(ExtractedTables)
+
 ```
 
-You can add options to executable code like this
+## XML scraping of goal information
+```{r, XmlScraping}
+matchEvents <- db_Match %>% 
+  select("league_id","country_id","home_team_api_id","away_team_api_id","match_api_id","date","season","home_team_goal","away_team_goal","goal") %>% 
+  mutate(goal = case_when(is.na(goal)~"<goal />",
+                          TRUE~goal))
+
+  
+#Adapted from Tom Snowden https://www.kaggle.com/datasets/hugomathien/soccer/discussion/22343?search=goal
+#function to extract data from xml
+GoalMiningLoopFUN <- function(matchEvents){
+  
+      #--Create dataframe to append to
+        goals_df_final <- data.frame(match_api_id = as.numeric(),
+                                     player1_scorer=as.numeric(),
+                                     player2_scorer=as.numeric(),
+                                     goal_scorer_team=as.numeric())
+        
+        for (n in 1:nrow(matchEvents)) {
+          
+        
+  
+      #--Capture home and away api_id : for use in attributing goals to home/away--##
+        home_team_api_id <- matchEvents$home_team_api_id[n]
+        away_team_api_id <- matchEvents$away_team_api_id[n]
+
+      #--Capture match_api_id : for use in naming output data frames--##
+        match_api_id <- matchEvents$match_api_id[n]
+
+      #--Extract "goal" data for the match--#
+        x<-matchEvents$goal[n]
+
+      #--Parse the goal data into xml--#
+        x1<-xmlParse(x)
+
+      #--Find the nodes containing time & team info--#
+        player1_nodes <- getNodeSet(x1,"//player1")
+        player2_nodes <- getNodeSet(x1,"//player2")
+        team_nodes <- getNodeSet(x1,"//team")
+
+      #--Loop through each goal event and capture the time & team--#
+        l <- length(player1_nodes)
+        player1_scorer <- numeric()
+        player2_scorer <- numeric()
+        goal_scorer_team <- numeric()
+
+        for (i in c(1:l)){
+          
+          #need to try catch for if these exist
+          subscriptError <- 0
+
+          player1 <- tryCatch({
+            as.numeric(xmlValue(player1_nodes[[i]]))
+          },
+          error = function(e){
+            subscriptError
+          }) 
+          
+          player2 <- tryCatch({
+            as.numeric(xmlValue(player2_nodes[[i]]))
+          },
+          error = function(e){
+            subscriptError
+          }) 
+          
+          team <- tryCatch({
+            as.numeric(xmlValue(team_nodes[[i]]))
+          },
+          error = function(e){
+            subscriptError
+          }) 
+
+          player1_scorer <- c(player1_scorer,player1)
+          player2_scorer <- c(player2_scorer,player2)
+          goal_scorer_team <- c(goal_scorer_team,team)
+
+        }
+
+        goals_df <- cbind.data.frame(match_api_id,player1_scorer,player2_scorer,goal_scorer_team)
+        
+        goals_df_final <- goals_df_final %>% 
+          bind_rows(goals_df)
+
+        }
+        
+        return(goals_df_final)
+        
+        
+        
+    }
+
+  #--------------------------------------#
+  # B.2 - Run function over all matches
+  #--------------------------------------#
+    
+    GoalsData <- GoalMiningLoopFUN(matchEvents = matchEvents)
+```
 
 ```{r}
-#| echo: false
-2 * 2
+GoalsMatchData <- matchEvents %>% 
+  left_join(GoalsData,
+            by = c("match_api_id")) %>% 
+  #if there is an assist, then player2_scorer is the one who has scored, and player1 assisted
+  mutate(goal_scorer = case_when(player2_scorer == 0~player1_scorer,
+                                 TRUE~player2_scorer),
+         assister = case_when(player2_scorer != 0~player1_scorer,
+                                 TRUE~0),
+         year = as.numeric(substr(date,1,4))) %>% 
+  select(-c("goal",
+            player1_scorer,
+            player2_scorer,
+            season,
+            date))
+
+
+db_PlayerTeamList <- db_Player %>% 
+  left_join(db_Match)
+
+ExtractedTablesFull <- ExtractedTablesAll %>% 
+  left_join(db_Player,
+            by = c("Player" = "player_name"))
+
+test <- matchEvents %>% 
+  left_join(db_Team,
+            by = c("home_team_api_id"="team_api_id")) %>% 
+  left_join(db_Team,
+            by = c("away_team_api_id"="team_api_id"))
 ```
 
 The `echo: false` option disables the printing of code (only output is displayed).
